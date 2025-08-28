@@ -1,5 +1,8 @@
 {
   "name": "webhook-vercel",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "firebase-admin": "^13.4.0"
+  }
 }
