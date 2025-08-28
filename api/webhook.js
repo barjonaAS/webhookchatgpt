@@ -8,14 +8,23 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
+  // 1) Validar método
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // (Opcional) protección simple por API key propia
+  // 2) Validar token de bypass
+  const token = req.query.token;
+  if (token !== process.env.VERCEL_BYPASS_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  // 3) (Opcional) protección adicional por API key en headers
   if (process.env.API_KEY) {
     const key = req.headers["x-api-key"];
-    if (key !== process.env.API_KEY) return res.status(401).json({ error: "Unauthorized" });
+    if (key !== process.env.API_KEY) {
+      return res.status(401).json({ error: "Unauthorized (API key)" });
+    }
   }
 
   try {
@@ -32,12 +41,10 @@ export default async function handler(req, res) {
       .slice(0, 200);
 
     // 1) Insert en tickets
-    // Si agregaste la columna idempotency_key UNIQUE, descomenta la línea
-    // idempotency_key: idemKey,
     let { data: ticketData, error: ticketErr } = await supabase
       .from("tickets")
       .insert({
-        // idempotency_key: idemKey,        // <--- opcional si creaste la columna única
+        // idempotency_key: idemKey, // <--- opcional si creaste la columna única
         source_filename: b.source_filename ?? null,
         vendor: b.vendor,
         purchase_date: b.purchase_date ?? null, // 'YYYY-MM-DD'
@@ -49,14 +56,16 @@ export default async function handler(req, res) {
       .select("id")
       .single();
 
-    // Si tenés UNIQUE por idempotency_key y chocó, buscá el id existente
+    // Si hay conflicto de idempotencia (columna UNIQUE)
     if (ticketErr && ticketErr.code === "23505") {
       const { data: existing, error: findErr } = await supabase
         .from("tickets")
         .select("id")
         .eq("idempotency_key", idemKey)
         .single();
-      if (findErr) return res.status(500).json({ error: "Lookup failed", details: findErr.message });
+      if (findErr) {
+        return res.status(500).json({ error: "Lookup failed", details: findErr.message });
+      }
       ticketData = existing;
       ticketErr = null;
     }
@@ -71,10 +80,17 @@ export default async function handler(req, res) {
     if (items.length) {
       const rows = items.map((it) => ({
         ticket_id: ticketId,
-        product: String(it.product ?? ""),
-        quantity: it.quantity != null ? Number(it.quantity) : 1,
-        unit_price: it.unit_price != null ? Number(it.unit_price) : null,
-        total: it.total != null ? Number(it.total) : (it.unit_price != null ? Number(it.unit_price) : 0)
+        product: String(it.producto ?? it.product ?? ""), // soporte ambos nombres
+        quantity: it.cantidad != null ? Number(it.cantidad) : (it.quantity != null ? Number(it.quantity) : 1),
+        unit_price: it.precio_unitario != null ? Number(it.precio_unitario) : (it.unit_price != null ? Number(it.unit_price) : null),
+        total:
+          it.total != null
+            ? Number(it.total)
+            : it.precio_unitario != null
+            ? Number(it.precio_unitario)
+            : it.unit_price != null
+            ? Number(it.unit_price)
+            : 0
       }));
       const { error: itemsErr } = await supabase.from("ticket_items").insert(rows);
       if (itemsErr) {
@@ -83,7 +99,6 @@ export default async function handler(req, res) {
     }
 
     // 3) Insert en ticket_discounts
-    // Espera un array b.discounts con objetos { concepto, monto }
     const discounts = Array.isArray(b.discounts) ? b.discounts : [];
     if (discounts.length) {
       const drows = discounts.map((d) => ({
@@ -91,7 +106,6 @@ export default async function handler(req, res) {
         concepto: String(d.concepto ?? d.concept ?? d.reason ?? ""),
         monto: Number(d.monto ?? d.amount ?? 0)
       }));
-      // filtra vacíos o montos inválidos
       const clean = drows.filter((d) => d.concepto && Number.isFinite(d.monto) && d.monto > 0);
       if (clean.length) {
         const { error: discErr } = await supabase.from("ticket_discounts").insert(clean);
